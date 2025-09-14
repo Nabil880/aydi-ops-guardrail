@@ -1,6 +1,6 @@
 # aydi_ops_guardrail.py
 # Streamlit app: AYDI Ops Guardrail — daily KPI tracker, budgets, and risk alerts.
-# Now with EN/AR language toggle.
+# EN/AR localization, Google Sheets backend (optional), monthly Budget vs Burn card.
 
 import os
 import io
@@ -8,38 +8,40 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
+# ----------- App constants (do not change unless the business asks) -----------
 APP_TITLE_EN = "AYDI Ops Guardrail — KPI & Risk Tracker"
 APP_TITLE_AR = "حارس عمليات أيدي — مؤشرات الأداء والمخاطر"
 
-DATA_PATH = "daily_metrics.csv"
-
-# paths
+DATA_PATH = "daily_metrics.csv"  # CSV fallback path
 LOGO_PATH = "assets/aydi_logo.png"
 
-
+# Targets (initial)
 DEFAULT_TARGETS = {
-    "annual_gmv_products": 482_125.0,    # OMR — sum of product categories only (excludes shipping & subs)
-    "annual_units_products": 20_555,     # units — total units across 10 product categories
-    "annual_deliveries": 14_550,         # deliveries — target handovers to last-mile partner
+    "annual_gmv_products": 482_125.0,    # OMR — products GMV only
+    "annual_units_products": 20_555,     # units — products
+    "annual_deliveries": 14_550,         # handovers to last-mile (not POD)
     "annual_vendors": 118,               # vendors onboarded
 }
 
+# Finance assumptions
 DEFAULT_FINANCE = {
-    "commission_rate": 0.15,             # 15% platform commission (confirmed)
-    "delivery_fee_per_order": 0.50,      # OMR — coordination fee from last-mile partner
+    "commission_rate": 0.15,             # 15% platform commission
+    "delivery_fee_per_order": 0.50,      # OMR — coordination fee per delivery (recognized on handover)
     "annual_marketing_budget": 6_000.0,  # OMR
-    "annual_admin_general": 58_487.0,    # OMR — admin & general
-    "working_capital": 85_487.0,         # OMR — operating capital
+    "annual_admin_general": 58_487.0,    # OMR
+    "working_capital": 85_487.0,         # OMR
 }
 
+# Alert thresholds
 DEFAULT_THRESHOLDS = {
     "min_conversion": 0.015,   # 1.5%
     "max_cac": 8.0,            # OMR
-    "min_otd": 0.95,           # 95% on-time delivery
+    "min_otd": 0.95,           # 95%
     "max_returns_rate": 0.07,  # 7%
     "min_aov": 20.0,           # OMR
 }
 
+# Data schema (daily)
 COLUMNS = [
     "date","sessions","orders","gmv_products","marketing_spend",
     "deliveries","returns","first_mile_pickups","handoff_last_mile",
@@ -55,9 +57,14 @@ L = {
         "lang_label": "Language",
         "sidebar_header": "Targets & Finance",
         "sidebar_caption": "Adjust targets and financial assumptions as needed.",
+        "datastore_header": "Data store",
+        "use_sheets": "Use Google Sheets (if configured)",
+        "backend_active": "Active backend: Google Sheets",
+        "backend_csv": "Active backend: CSV file",
+        "backend_fallback": "Google Sheets not configured or unavailable — falling back to CSV.",
         "annual_gmv": "Annual GMV target (products only, OMR)",
         "annual_units": "Annual units target (products)",
-        "annual_deliveries": "Annual deliveries target",
+        "annual_deliveries": "Annual deliveries target (handover to last-mile)",
         "annual_vendors": "Annual vendors target",
         "commission_rate": "Commission rate (platform)",
         "delivery_fee": "Delivery coordination fee (OMR/order)",
@@ -83,6 +90,12 @@ L = {
         "metric_commission_ytd": "Commission Rev — YTD",
         "metric_delivery_ytd": "Delivery Rev — YTD",
         "metric_marketing_ytd": "Marketing — YTD",
+
+        "budget_header": "Monthly Budget vs Burn",
+        "budget_hint": "Budget = (Marketing + Admin/General) / 12. Burn = Marketing MTD + Admin/General monthly.",
+        "budget_label": "MTD Burn {burn:.0f} / Monthly Budget {budget:.0f} OMR",
+        "wc_metric": "Working capital left",
+        "wc_runway": "≈ {months:.1f} months at current monthly budget",
 
         "risk_header": "Risk Alerts",
         "risk_no_data": "No alerts — add data first.",
@@ -111,7 +124,7 @@ L = {
         "deliveries": "Deliveries (handed to last-mile)",
         "returns": "Returns (count)",
         "first_mile": "First-mile pickups (count)",
-        "handoff": "Deliveries completed (POD)",
+        "handoff": "Delivered to customer (POD)",
         "vendors_new": "Vendors onboarded (new)",
         "skus_added": "SKUs added",
         "skus_backlog": "SKU backlog (open)",
@@ -131,9 +144,14 @@ L = {
         "lang_label": "اللغة",
         "sidebar_header": "الأهداف والمالية",
         "sidebar_caption": "يمكن تعديل الأهداف والافتراضات المالية عند الحاجة.",
+        "datastore_header": "مخزن البيانات",
+        "use_sheets": "استخدم Google Sheets (إن تم إعداده)",
+        "backend_active": "المخزن الفعّال: Google Sheets",
+        "backend_csv": "المخزن الفعّال: ملف CSV",
+        "backend_fallback": "لم يتم إعداد Google Sheets أو غير متاح — سيتم استخدام CSV.",
         "annual_gmv": "هدف GMV السنوي (المنتجات فقط، ر.ع)",
         "annual_units": "هدف عدد الوحدات السنوي (منتجات)",
-        "annual_deliveries": "هدف عدد التوصيلات السنوي",
+        "annual_deliveries": "هدف التوصيلات السنوي (تسليم لشركة التوصيل)",
         "annual_vendors": "هدف عدد المورّدين السنوي",
         "commission_rate": "نسبة العمولة (المنصّة)",
         "delivery_fee": "رسوم تنسيق التوصيل (ر.ع/طلب)",
@@ -145,9 +163,9 @@ L = {
         "max_cac": "أعلى CAC (ر.ع)",
         "min_otd": "أدنى معدل التسليم في الوقت",
         "max_returns": "أعلى معدل مرتجعات",
-        "min_aov": "أدنى AOV (ر.ع)",
+        "min_aov": "أدنى متوسط السلة (ر.ع)",
 
-        "kpi_header": "مؤشرات اليوم / الشهر حتى تاريخه / السنة حتى تاريخه",
+        "kpi_header": "مؤشرات اليوم / الشهر / السنة",
         "no_data_yet": "لا توجد بيانات بعد. أضف أول سجل يومي أدناه.",
         "metric_aov_mtd": "متوسط السلة (ر.ع) — شهر",
         "metric_conv_mtd": "التحويل — شهر",
@@ -159,6 +177,12 @@ L = {
         "metric_commission_ytd": "إيراد العمولة — سنة",
         "metric_delivery_ytd": "إيراد التوصيل — سنة",
         "metric_marketing_ytd": "التسويق — سنة",
+
+        "budget_header": "ميزانية الشهر مقابل الحرق",
+        "budget_hint": "الميزانية = (التسويق + الإدارة/العموميات) ÷ 12. الحرق = تسويق شهر حتى تاريخه + قسمة الإدارة/العموميات الشهرية.",
+        "budget_label": "الحرق {burn:.0f} / ميزانية الشهر {budget:.0f} ر.ع",
+        "wc_metric": "رأس المال العامل المتبقي",
+        "wc_runway": "≈ {months:.1f} شهر على الميزانية الشهرية الحالية",
 
         "risk_header": "تنبيهات المخاطر",
         "risk_no_data": "لا توجد تنبيهات — أضف بيانات أولاً.",
@@ -180,18 +204,18 @@ L = {
 
         "form_header": "إضافة / تحديث سجل يومي",
         "date": "التاريخ",
-        "sessions": "الزيارات (سيشنز)",
-        "orders": "الطلبات (عدد الوحدات المباعة)",
+        "sessions": "الزيارات (Sessions)",
+        "orders": "الطلبات (عدد الوحدات)",
         "gmv": "GMV (المنتجات فقط، ر.ع)",
         "marketing": "إنفاق التسويق (ر.ع)",
-        "deliveries": "التوصيلات (المسلَّمة لآخر ميل)",
+        "deliveries": "التوصيلات (تسليم لشركة التوصيل)",
         "returns": "المرتجعات (عدد)",
         "first_mile": "سحوبات First-mile (عدد)",
-        "handoff": "التسليم للعميل (تمّ)",
+        "handoff": "تم التسليم للعميل (POD)",
         "vendors_new": "المورّدون المسجّلون (جدد)",
-        "skus_added": "عدد المنتجات المضافة (SKUs)",
+        "skus_added": "المنتجات المضافة (SKUs)",
         "skus_backlog": "تراكم المنتجات المفتوحة (SKU)",
-        "csat": "رضا العملاء CSAT (0–100)",
+        "csat": "رضا العملاء (0–100)",
         "otd_total": "OTD — إجمالي المسلَّم اليوم",
         "otd_on_time": "OTD — المسلَّم في الوقت",
         "save_update": "حفظ / تحديث",
@@ -204,6 +228,7 @@ L = {
 }
 
 def rtl_css():
+    """Flip layout to RTL for Arabic."""
     st.markdown(
         """
         <style>
@@ -212,49 +237,182 @@ def rtl_css():
         """,
         unsafe_allow_html=True,
     )
-    
 
-# -------------------- Data store --------------------
-def init_store():
-    if not os.path.exists(DATA_PATH):
-        df = pd.DataFrame(columns=COLUMNS)
-        df.to_csv(DATA_PATH, index=False)
+# Robust progress helper (works on older/newer Streamlit)
+def progress_with_text(value: float, text: str):
+    try:
+        st.progress(value, text=text)
+    except TypeError:
+        st.progress(value)
+        st.caption(text)
 
-def load_data():
-    init_store()
-    df = pd.read_csv(DATA_PATH)
-    if not df.empty:
-        df["date"] = pd.to_datetime(df["date"]).dt.date
-        for col in COLUMNS[1:]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    return df
+# -------------------- Storage backends --------------------
+class CSVStore:
+    """Simple CSV storage."""
+    def __init__(self, path: str):
+        self.path = path
+        if not os.path.exists(self.path):
+            pd.DataFrame(columns=COLUMNS).to_csv(self.path, index=False)
 
-def save_data(df):
-    df.to_csv(DATA_PATH, index=False)
+    def load(self) -> pd.DataFrame:
+        df = pd.read_csv(self.path)
+        if not df.empty:
+            df["date"] = pd.to_datetime(df["date"]).dt.date
+            for col in COLUMNS[1:]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        return df[COLUMNS] if not df.empty else df
 
-# -------------------- UI --------------------
-def ui_lang():
-    st.sidebar.selectbox(
+    def save(self, df: pd.DataFrame) -> None:
+        out = df.copy()
+        out = out[COLUMNS]  # ensure correct ordering
+        out.to_csv(self.path, index=False)
+
+class GSheetsStore:
+    """Google Sheets storage with gspread; full-sheet replace on save."""
+    def __init__(self, spreadsheet_id: str, worksheet_title: str = "daily_metrics"):
+        self.ready = False
+        self.error = None
+        try:
+            import gspread
+            from google.oauth2.service_account import Credentials
+        except Exception as e:
+            self.error = f"Missing gspread/google-auth: {e}"
+            return
+
+        # Secrets-safe: gracefully handle missing secrets or malformed files
+        try:
+            sa_info = st.secrets["gcp_service_account"]
+            _gs = st.secrets["gsheets"]
+        except Exception:
+            self.error = "Secrets not found."
+            return
+
+        creds = Credentials.from_service_account_info(
+            sa_info,
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive",
+            ],
+        )
+        try:
+            client = gspread.authorize(creds)
+            sh = client.open_by_key(spreadsheet_id)
+            try:
+                ws = sh.worksheet(worksheet_title)
+            except Exception:
+                ws = sh.add_worksheet(title=worksheet_title, rows=1000, cols=len(COLUMNS))
+                ws.update([COLUMNS])
+            self.client = client
+            self.sheet = sh
+            self.ws = ws
+            self.ready = True
+        except Exception as e:
+            self.error = f"GSheets auth/open failed: {e}"
+            self.ready = False
+
+    def load(self) -> pd.DataFrame:
+        if not self.ready:
+            return pd.DataFrame(columns=COLUMNS)
+        try:
+            rows = self.ws.get_all_values()
+            if not rows:
+                self.ws.update([COLUMNS])
+                return pd.DataFrame(columns=COLUMNS)
+            header = rows[0]
+            data = rows[1:]
+            df = pd.DataFrame(data, columns=header)
+            for col in COLUMNS:
+                if col not in df.columns:
+                    df[col] = 0
+            df = df[COLUMNS]
+            if not df.empty:
+                df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+                for col in COLUMNS[1:]:
+                    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+            return df
+        except Exception:
+            return pd.DataFrame(columns=COLUMNS)
+
+    def save(self, df: pd.DataFrame) -> None:
+        if not self.ready:
+            return
+        out = df.copy()
+        out = out[COLUMNS]
+        out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
+        values = [COLUMNS] + out.astype(str).values.tolist()
+        self.ws.clear()
+        self.ws.update(values)
+
+# -------------------- Secrets helpers --------------------
+def has_sheets_config() -> bool:
+    """True if a valid Sheets config exists; safe when secrets.toml is absent."""
+    try:
+        gs = st.secrets.get("gsheets", None)
+        sa = st.secrets.get("gcp_service_account", None)
+        return bool(gs and sa and gs.get("spreadsheet_id"))
+    except Exception:
+        return False
+
+def get_backend(lang: str, prefer_sheets: bool = True):
+    """
+    Returns (store, backend_label, fallback_msg)
+    prefer_sheets=True tries Google Sheets first (if configured), else CSV.
+    Secrets-safe: never raises if secrets.toml is missing.
+    """
+    backend_label = L[lang]["backend_csv"]
+    fallback_msg = None
+
+    gsheets_conf = None
+    try:
+        gsheets_conf = st.secrets.get("gsheets", None)
+    except Exception:
+        gsheets_conf = None
+
+    if prefer_sheets and gsheets_conf and gsheets_conf.get("spreadsheet_id"):
+        store = GSheetsStore(
+            spreadsheet_id=gsheets_conf["spreadsheet_id"],
+            worksheet_title=gsheets_conf.get("worksheet", "daily_metrics"),
+        )
+        if getattr(store, "ready", False):
+            backend_label = L[lang]["backend_active"]
+            return store, backend_label, None
+        else:
+            fallback_msg = L[lang]["backend_fallback"]
+
+    # Default / fallback
+    store = CSVStore(DATA_PATH)
+    return store, backend_label, fallback_msg
+
+# -------------------- UI helpers --------------------
+def ui_lang() -> str:
+    # Sidebar language selector (sticky in session state)
+    lang = st.sidebar.selectbox(
         f"{L['EN']['lang_label']} / {L['AR']['lang_label']}",
         options=["EN","AR"],
         index=0 if st.session_state.get("lang","EN")=="EN" else 1,
         key="lang"
     )
-    if st.session_state["lang"] == "AR":
-        st.html('<div dir="rtl"></div>')
+    # Flip layout for Arabic
+    if lang == "AR":
         rtl_css()
+        st.markdown('<div dir="rtl"></div>', unsafe_allow_html=True)
     else:
-        st.html('<div dir="ltr"></div>')
-    return st.session_state["lang"]
+        st.markdown('<div dir="ltr"></div>', unsafe_allow_html=True)
+    return lang
 
-def t(lang, key):
-    return L[lang][key]
+def t(lang, key): return L[lang][key]
 
 def ui_sidebar(lang):
     st.sidebar.header(t(lang,"sidebar_header"))
     st.sidebar.caption(t(lang,"sidebar_caption"))
 
+    # Data store selection
+    st.sidebar.subheader(t(lang, "datastore_header"))
+    default_use_sheets = has_sheets_config()
+    prefer_sheets = st.sidebar.checkbox(t(lang, "use_sheets"), value=default_use_sheets)
+
+    # Targets
     annual_gmv = st.sidebar.number_input(t(lang,"annual_gmv"),
                                          value=float(DEFAULT_TARGETS["annual_gmv_products"]), step=100.0)
     annual_units = st.sidebar.number_input(t(lang,"annual_units"),
@@ -291,6 +449,7 @@ def ui_sidebar(lang):
                                       value=float(DEFAULT_THRESHOLDS["min_aov"]), step=1.0)
 
     return {
+        "prefer_sheets": prefer_sheets,
         "targets": {
             "annual_gmv": annual_gmv,
             "annual_units": annual_units,
@@ -313,6 +472,35 @@ def ui_sidebar(lang):
         }
     }
 
+# -------------------- KPI / Risk / Progress --------------------
+def _agg_period(dfx: pd.DataFrame, finance: dict) -> dict:
+    """Aggregate KPI metrics for a given slice."""
+    sessions = dfx["sessions"].sum()
+    orders = dfx["orders"].sum()
+    gmv = dfx["gmv_products"].sum()
+    deliveries = dfx["deliveries"].sum()  # handover count
+    marketing = dfx["marketing_spend"].sum()
+    returns = dfx["returns"].sum()
+
+    commission_revenue = gmv * finance["commission_rate"]
+    delivery_revenue = deliveries * finance["delivery_fee"]  # recognize on handover
+
+    aov = (gmv / orders) if orders > 0 else 0.0
+    conv = (orders / sessions) if sessions > 0 else 0.0
+    cac = (marketing / orders) if orders > 0 else 0.0
+    returns_rate = (returns / max(orders, 1))
+
+    otd_on_time = dfx["otd_on_time"].sum()
+    otd_total = dfx["otd_total"].sum()
+    otd_rate = (otd_on_time / otd_total) if otd_total > 0 else 0.0
+
+    return {
+        "sessions": sessions, "orders": orders, "gmv": gmv, "deliveries": deliveries,
+        "marketing": marketing, "returns": returns, "commission_rev": commission_revenue,
+        "delivery_rev": delivery_revenue, "aov": aov, "conv": conv, "cac": cac,
+        "returns_rate": returns_rate, "otd_rate": otd_rate
+    }
+
 def kpi_cards(df, config, lang):
     st.subheader(t(lang,"kpi_header"))
     if df.empty:
@@ -320,42 +508,18 @@ def kpi_cards(df, config, lang):
         return
 
     df_sorted = df.sort_values("date")
-    today = df_sorted["date"].max()
-    this_month = pd.to_datetime(today).month
-    this_year = pd.to_datetime(today).year
+    latest = df_sorted["date"].max()
+    this_month = pd.to_datetime(latest).month
+    this_year = pd.to_datetime(latest).year
 
     df_mtd = df_sorted[(pd.to_datetime(df_sorted["date"]).dt.month == this_month) &
                        (pd.to_datetime(df_sorted["date"]).dt.year == this_year)]
     df_ytd = df_sorted[pd.to_datetime(df_sorted["date"]).dt.year == this_year]
+    today_row = df_sorted[df_sorted["date"] == latest]
 
-    def agg(dfx):
-        sessions = dfx["sessions"].sum()
-        orders = dfx["orders"].sum()
-        gmv = dfx["gmv_products"].sum()
-        deliveries = dfx["deliveries"].sum()
-        marketing = dfx["marketing_spend"].sum()
-        returns = dfx["returns"].sum()
-        commission_revenue = gmv * config["finance"]["commission_rate"]
-        handoffs = dfx["handoff_last_mile"].sum()
-        delivery_revenue = handoffs * config["finance"]["delivery_fee"]  # use handoffs
-        aov = (gmv / orders) if orders > 0 else 0.0
-        conv = (orders / sessions) if sessions > 0 else 0.0
-        cac = (marketing / orders) if orders > 0 else 0.0
-        returns_rate = (returns / max(orders,1))
-        otd_on_time = dfx["otd_on_time"].sum()
-        otd_total = dfx["otd_total"].sum()
-        otd_rate = (otd_on_time / otd_total) if otd_total > 0 else 0.0
-        return {
-            "sessions": sessions, "orders": orders, "gmv": gmv, "deliveries": deliveries,
-            "marketing": marketing, "returns": returns, "commission_rev": commission_revenue,
-            "delivery_rev": delivery_revenue, "aov": aov, "conv": conv, "cac": cac,
-            "returns_rate": returns_rate, "otd_rate": otd_rate
-        }
-
-    mtd = agg(df_mtd)
-    ytd = agg(df_ytd)
-    today_row = df_sorted[df_sorted["date"] == today]
-    td = agg(today_row) if not today_row.empty else {k:0 for k in mtd.keys()}
+    mtd = _agg_period(df_mtd, config["finance"])
+    ytd = _agg_period(df_ytd, config["finance"])
+    _ = _agg_period(today_row, config["finance"]) if not today_row.empty else mtd
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric(t(lang,"metric_aov_mtd"), f"{mtd['aov']:.2f}")
@@ -370,6 +534,45 @@ def kpi_cards(df, config, lang):
     c3.metric(t(lang,"metric_commission_ytd"), f"{ytd['commission_rev']:.0f}")
     c4.metric(t(lang,"metric_delivery_ytd"), f"{ytd['delivery_rev']:.0f}")
     c5.metric(t(lang,"metric_marketing_ytd"), f"{ytd['marketing']:.0f}")
+
+def budget_vs_burn(df, config, lang):
+    """Monthly budget vs MTD burn card + working-capital runway helper."""
+    st.subheader(t(lang, "budget_header"))
+    st.caption(t(lang, "budget_hint"))
+
+    # Compute monthly budget
+    monthly_admin = config["finance"]["admin_general"] / 12.0
+    monthly_marketing_budget = config["finance"]["marketing_budget"] / 12.0
+    monthly_budget_total = monthly_admin + monthly_marketing_budget
+
+    if df.empty:
+        progress_with_text(0.0, t(lang, "budget_label").format(burn=0.0, budget=monthly_budget_total))
+        wc_left = config['finance']['working_capital']
+        runway = (wc_left / monthly_budget_total) if monthly_budget_total > 0 else 0.0
+        st.metric(t(lang, "wc_metric"), f"{wc_left:.0f}", t(lang, "wc_runway").format(months=runway))
+        return
+
+    df_sorted = df.sort_values("date")
+    latest = df_sorted["date"].max()
+    this_month = pd.to_datetime(latest).month
+    this_year = pd.to_datetime(latest).year
+    months_elapsed = this_month  # Jan=1 .. current month
+
+    df_mtd = df_sorted[(pd.to_datetime(df_sorted["date"]).dt.month == this_month) &
+                       (pd.to_datetime(df_sorted["date"]).dt.year == this_year)]
+    df_ytd = df_sorted[pd.to_datetime(df_sorted["date"]).dt.year == this_year]
+
+    marketing_mtd = df_mtd["marketing_spend"].sum()
+    marketing_ytd = df_ytd["marketing_spend"].sum()
+
+    burn_mtd = marketing_mtd + monthly_admin  # assume admin is time-based monthly expense
+    pct = min(burn_mtd / monthly_budget_total, 1.0) if monthly_budget_total > 0 else 0.0
+    progress_with_text(pct, t(lang, "budget_label").format(burn=burn_mtd, budget=monthly_budget_total))
+
+    wc_spent_est = marketing_ytd + (months_elapsed * monthly_admin)
+    wc_left = max(config["finance"]["working_capital"] - wc_spent_est, 0.0)
+    runway = (wc_left / monthly_budget_total) if monthly_budget_total > 0 else 0.0
+    st.metric(t(lang, "wc_metric"), f"{wc_left:.0f}", t(lang, "wc_runway").format(months=runway))
 
 def risk_alerts(df, config, lang):
     st.subheader(t(lang,"risk_header"))
@@ -388,7 +591,6 @@ def risk_alerts(df, config, lang):
     orders = df_mtd["orders"].sum()
     gmv = df_mtd["gmv_products"].sum()
     marketing = df_mtd["marketing_spend"].sum()
-    deliveries = df_mtd["deliveries"].sum()
     returns = df_mtd["returns"].sum()
     otd_on_time = df_mtd["otd_on_time"].sum()
     otd_total = df_mtd["otd_total"].sum()
@@ -423,24 +625,25 @@ def progress_vs_targets(df, config, lang):
         st.info(t(lang,"progress_no_data"))
         return
 
-    df["year"] = pd.to_datetime(df["date"]).dt.year
-    current_year = df["year"].max()
-    dfx = df[df["year"] == current_year]
+    df_tmp = df.copy()
+    df_tmp["year"] = pd.to_datetime(df_tmp["date"]).dt.year
+    current_year = df_tmp["year"].max()
+    dfx = df_tmp[df_tmp["year"] == current_year]
 
     gmv = dfx["gmv_products"].sum()
     orders = dfx["orders"].sum()
-    deliveries = dfx["handoff_last_mile"].sum()  # progress vs annual handover target
+    deliveries = dfx["deliveries"].sum()  # compare to annual "handover to last-mile" target
     vendors_added = dfx["vendors_new"].sum()
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.progress(min(gmv / config["targets"]["annual_gmv"], 1.0),
-                text=t(lang,"progress_gmv").format(cur=gmv, tar=config["targets"]["annual_gmv"]))
-    c2.progress(min(orders / config["targets"]["annual_units"], 1.0),
-                text=t(lang,"progress_units").format(cur=int(orders), tar=int(config["targets"]["annual_units"])))
-    c3.progress(min(deliveries / config["targets"]["annual_deliveries"], 1.0),
-                text=t(lang,"progress_deliveries").format(cur=int(deliveries), tar=int(config["targets"]["annual_deliveries"])))
-    c4.progress(min(vendors_added / config["targets"]["annual_vendors"], 1.0),
-                text=t(lang,"progress_vendors").format(cur=int(vendors_added), tar=int(config["targets"]["annual_vendors"])))
+    progress_with_text(min(gmv / config["targets"]["annual_gmv"], 1.0),
+                       t(lang,"progress_gmv").format(cur=gmv, tar=config["targets"]["annual_gmv"]))
+    progress_with_text(min(orders / config["targets"]["annual_units"], 1.0),
+                       t(lang,"progress_units").format(cur=int(orders), tar=int(config["targets"]["annual_units"])))
+    progress_with_text(min(deliveries / config["targets"]["annual_deliveries"], 1.0),
+                       t(lang,"progress_deliveries").format(cur=int(deliveries), tar=int(config["targets"]["annual_deliveries"])))
+    progress_with_text(min(vendors_added / config["targets"]["annual_vendors"], 1.0),
+                       t(lang,"progress_vendors").format(cur=int(vendors_added), tar=int(config["targets"]["annual_vendors"])))
 
 def charts(df, lang):
     st.subheader(t(lang,"trends_header"))
@@ -453,7 +656,8 @@ def charts(df, lang):
     st.line_chart(df_plot.set_index("date")[["gmv_products","orders","deliveries","marketing_spend"]], height=260)
     st.line_chart(df_plot.set_index("date")[["otd_on_time","otd_total","returns"]], height=200)
 
-def input_form(df, lang):
+# -------------------- Input / Export --------------------
+def input_form(df, store, lang):
     st.subheader(t(lang,"form_header"))
     with st.form("daily_input"):
         c1, c2, c3 = st.columns(3)
@@ -469,7 +673,7 @@ def input_form(df, lang):
         c7, c8, c9 = st.columns(3)
         returns = c7.number_input(t(lang,"returns"), min_value=0, step=1)
         first_mile = c8.number_input(t(lang,"first_mile"), min_value=0, step=1)
-        handoff = c9.number_input(t(lang,"handoff"), min_value=0, step=1)
+        pod = c9.number_input(t(lang,"handoff"), min_value=0, step=1)
 
         c10, c11, c12 = st.columns(3)
         vendors_new = c10.number_input(t(lang,"vendors_new"), min_value=0, step=1)
@@ -486,17 +690,18 @@ def input_form(df, lang):
             row = {
                 "date": d, "sessions": sessions, "orders": orders, "gmv_products": gmv,
                 "marketing_spend": marketing, "deliveries": deliveries, "returns": returns,
-                "first_mile_pickups": first_mile, "handoff_last_mile": handoff, "vendors_new": vendors_new,
+                "first_mile_pickups": first_mile, "handoff_last_mile": pod, "vendors_new": vendors_new,
                 "skus_added": skus_added, "skus_backlog": skus_backlog, "csat": csat,
                 "otd_total": otd_total, "otd_on_time": otd_on_time
             }
-            if (df["date"] == d).any():
+            if not df.empty and (df["date"] == d).any():
                 df.loc[df["date"] == d, list(row.keys())] = list(row.values())
             else:
                 df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-            save_data(df)
+            store.save(df)
             st.success(t(lang,"saved"))
-    return load_data()
+    # Reload from store to ensure consistency with backend
+    return store.load()
 
 def downloads(df, lang):
     st.subheader(t(lang,"export_header"))
@@ -511,28 +716,36 @@ def downloads(df, lang):
 # -------------------- Main --------------------
 def main():
     st.set_page_config(page_title=APP_TITLE_EN, page_icon=LOGO_PATH, layout="wide")
-    # Language selector first
     col_logo, col_title = st.columns([1, 9])
     with col_logo:
-        st.image(LOGO_PATH, width=64)
-        
+        if os.path.exists(LOGO_PATH):
+            st.image(LOGO_PATH, width=64)
+
     lang = ui_lang()
     st.title(t(lang,"title"))
     st.caption(t(lang,"caption"))
-    
-    
+
     config = ui_sidebar(lang)
-    df = load_data()
+    # Backend activation
+    store, backend_label, fallback_msg = get_backend(lang, prefer_sheets=config["prefer_sheets"])
+    with st.sidebar:
+        st.success(backend_label if "Google" in backend_label else backend_label)
+        if fallback_msg:
+            st.warning(fallback_msg)
+
+    df = store.load()
 
     # Layout
     kpi_cards(df, config, lang)
+    budget_vs_burn(df, config, lang)       # NEW monthly card
     risk_alerts(df, config, lang)
     progress_vs_targets(df, config, lang)
     charts(df, lang)
 
     st.divider()
-    df = input_form(df, lang)
+    df = input_form(df, store, lang)
     downloads(df, lang)
 
 if __name__ == "__main__":
     main()
+
